@@ -12,7 +12,7 @@
 # !!   "id": "TitleTop"
 # !! }}
 """
-# Disco Diffusion v5.6 - Now with portrait_generator_v001
+# Disco Diffusion v5.6 MARANGE - Now with portrait_generator_v001 and random prompt adaption
 
 Disco Diffusion - http://discodiffusion.com/ , https://github.com/alembics/disco-diffusion
 
@@ -473,6 +473,7 @@ initDirPath = f'{root_path}/init_images'
 createPath(initDirPath)
 outDirPath = f'{root_path}/images_out'
 createPath(outDirPath)
+createPath(f'{root_path}/settings')
 
 if is_colab:
     if google_drive and not save_models_to_google_drive or not google_drive:
@@ -1240,7 +1241,6 @@ def do_run():
         else:
           init_image = f'{videoFramesFolder}/{frame_num+1:04}.jpg'
 
-
       loss_values = []
   
       if seed is not None:
@@ -1267,257 +1267,268 @@ def do_run():
       else:
         image_prompt = []
 
-      print(f'Frame {frame_num} Prompt: {frame_prompt}')
+  #    print(f'Frame {frame_num} Prompt: {frame_prompt}')
 
-      model_stats = []
-      for clip_model in clip_models:
-            cutn = 16
-            model_stat = {"clip_model":None,"target_embeds":[],"make_cutouts":None,"weights":[]}
-            model_stat["clip_model"] = clip_model
-            
-            for prompt in frame_prompt:
-                txt, weight = parse_prompt(prompt)
-                txt = clip_model.encode_text(clip.tokenize(prompt).to(device)).float()
-                
-                if args.fuzzy_prompt:
-                    for i in range(25):
-                        model_stat["target_embeds"].append((txt + torch.randn(txt.shape).cuda() * args.rand_mag).clamp(0,1))
+      # BATCH LOOP
+      for marange_i in range(args.n_randomprompts):
+          model_stats = []
+
+          prompt_variant = pick_prompt_variant(frame_prompt)
+          if prompt_variant !=  frame_prompt:
+                random_list = {
+                    'used_prompt': prompt_variant
+                }
+                with open(f"{batchFolder}/{args.batch_name}({args.batchNum})[{marange_i}] usedprompt.txt", "w+", encoding="utf-8") as f:
+                    json.dump(random_list, f, ensure_ascii=False, indent=4)
+
+          for clip_model in clip_models:
+                cutn = 16
+                model_stat = {"clip_model":None,"target_embeds":[],"make_cutouts":None,"weights":[]}
+                model_stat["clip_model"] = clip_model
+
+                for prompt in prompt_variant:
+                    txt, weight = parse_prompt(prompt)
+                    txt = clip_model.encode_text(clip.tokenize(prompt).to(device)).float()
+
+                    if args.fuzzy_prompt:
+                        for i in range(25):
+                            model_stat["target_embeds"].append((txt + torch.randn(txt.shape).cuda() * args.rand_mag).clamp(0,1))
+                            model_stat["weights"].append(weight)
+                    else:
+                        model_stat["target_embeds"].append(txt)
                         model_stat["weights"].append(weight)
-                else:
-                    model_stat["target_embeds"].append(txt)
-                    model_stat["weights"].append(weight)
-        
-            if image_prompt:
-              model_stat["make_cutouts"] = MakeCutouts(clip_model.visual.input_resolution, cutn, skip_augs=skip_augs) 
-              for prompt in image_prompt:
-                  path, weight = parse_prompt(prompt)
-                  img = Image.open(fetch(path)).convert('RGB')
-                  img = TF.resize(img, min(side_x, side_y, *img.size), T.InterpolationMode.LANCZOS)
-                  batch = model_stat["make_cutouts"](TF.to_tensor(img).to(device).unsqueeze(0).mul(2).sub(1))
-                  embed = clip_model.encode_image(normalize(batch)).float()
-                  if fuzzy_prompt:
-                      for i in range(25):
-                          model_stat["target_embeds"].append((embed + torch.randn(embed.shape).cuda() * rand_mag).clamp(0,1))
-                          weights.extend([weight / cutn] * cutn)
+
+                if image_prompt:
+                  model_stat["make_cutouts"] = MakeCutouts(clip_model.visual.input_resolution, cutn, skip_augs=skip_augs) 
+                  for prompt in image_prompt:
+                      path, weight = parse_prompt(prompt)
+                      img = Image.open(fetch(path)).convert('RGB')
+                      img = TF.resize(img, min(side_x, side_y, *img.size), T.InterpolationMode.LANCZOS)
+                      batch = model_stat["make_cutouts"](TF.to_tensor(img).to(device).unsqueeze(0).mul(2).sub(1))
+                      embed = clip_model.encode_image(normalize(batch)).float()
+                      if fuzzy_prompt:
+                          for i in range(25):
+                              model_stat["target_embeds"].append((embed + torch.randn(embed.shape).cuda() * rand_mag).clamp(0,1))
+                              weights.extend([weight / cutn] * cutn)
+                      else:
+                          model_stat["target_embeds"].append(embed)
+                          model_stat["weights"].extend([weight / cutn] * cutn)
+
+                model_stat["target_embeds"] = torch.cat(model_stat["target_embeds"])
+                model_stat["weights"] = torch.tensor(model_stat["weights"], device=device)
+                if model_stat["weights"].sum().abs() < 1e-3:
+                    raise RuntimeError('The weights must not sum to 0.')
+                model_stat["weights"] /= model_stat["weights"].sum().abs()
+                model_stats.append(model_stat)
+
+          init = None
+          if init_image is not None:
+              init = Image.open(fetch(init_image)).convert('RGB')
+              init = init.resize((args.side_x, args.side_y), Image.LANCZOS)
+              init = TF.to_tensor(init).to(device).unsqueeze(0).mul(2).sub(1)
+
+          if args.perlin_init:
+              if args.perlin_mode == 'color':
+                  init = create_perlin_noise([1.5**-i*0.5 for i in range(12)], 1, 1, False)
+                  init2 = create_perlin_noise([1.5**-i*0.5 for i in range(8)], 4, 4, False)
+              elif args.perlin_mode == 'gray':
+                init = create_perlin_noise([1.5**-i*0.5 for i in range(12)], 1, 1, True)
+                init2 = create_perlin_noise([1.5**-i*0.5 for i in range(8)], 4, 4, True)
+              else:
+                init = create_perlin_noise([1.5**-i*0.5 for i in range(12)], 1, 1, False)
+                init2 = create_perlin_noise([1.5**-i*0.5 for i in range(8)], 4, 4, True)
+              # init = TF.to_tensor(init).add(TF.to_tensor(init2)).div(2).to(device)
+              init = TF.to_tensor(init).add(TF.to_tensor(init2)).div(2).to(device).unsqueeze(0).mul(2).sub(1)
+              del init2
+
+          cur_t = None
+
+          def cond_fn(x, t, y=None):
+              with torch.enable_grad():
+                  x_is_NaN = False
+                  x = x.detach().requires_grad_()
+                  n = x.shape[0]
+                  if use_secondary_model is True:
+                    alpha = torch.tensor(diffusion.sqrt_alphas_cumprod[cur_t], device=device, dtype=torch.float32)
+                    sigma = torch.tensor(diffusion.sqrt_one_minus_alphas_cumprod[cur_t], device=device, dtype=torch.float32)
+                    cosine_t = alpha_sigma_to_t(alpha, sigma)
+                    out = secondary_model(x, cosine_t[None].repeat([n])).pred
+                    fac = diffusion.sqrt_one_minus_alphas_cumprod[cur_t]
+                    x_in = out * fac + x * (1 - fac)
+                    x_in_grad = torch.zeros_like(x_in)
                   else:
-                      model_stat["target_embeds"].append(embed)
-                      model_stat["weights"].extend([weight / cutn] * cutn)
-        
-            model_stat["target_embeds"] = torch.cat(model_stat["target_embeds"])
-            model_stat["weights"] = torch.tensor(model_stat["weights"], device=device)
-            if model_stat["weights"].sum().abs() < 1e-3:
-                raise RuntimeError('The weights must not sum to 0.')
-            model_stat["weights"] /= model_stat["weights"].sum().abs()
-            model_stats.append(model_stat)
-  
-      init = None
-      if init_image is not None:
-          init = Image.open(fetch(init_image)).convert('RGB')
-          init = init.resize((args.side_x, args.side_y), Image.LANCZOS)
-          init = TF.to_tensor(init).to(device).unsqueeze(0).mul(2).sub(1)
-      
-      if args.perlin_init:
-          if args.perlin_mode == 'color':
-              init = create_perlin_noise([1.5**-i*0.5 for i in range(12)], 1, 1, False)
-              init2 = create_perlin_noise([1.5**-i*0.5 for i in range(8)], 4, 4, False)
-          elif args.perlin_mode == 'gray':
-            init = create_perlin_noise([1.5**-i*0.5 for i in range(12)], 1, 1, True)
-            init2 = create_perlin_noise([1.5**-i*0.5 for i in range(8)], 4, 4, True)
-          else:
-            init = create_perlin_noise([1.5**-i*0.5 for i in range(12)], 1, 1, False)
-            init2 = create_perlin_noise([1.5**-i*0.5 for i in range(8)], 4, 4, True)
-          # init = TF.to_tensor(init).add(TF.to_tensor(init2)).div(2).to(device)
-          init = TF.to_tensor(init).add(TF.to_tensor(init2)).div(2).to(device).unsqueeze(0).mul(2).sub(1)
-          del init2
-  
-      cur_t = None
-  
-      def cond_fn(x, t, y=None):
-          with torch.enable_grad():
-              x_is_NaN = False
-              x = x.detach().requires_grad_()
-              n = x.shape[0]
-              if use_secondary_model is True:
-                alpha = torch.tensor(diffusion.sqrt_alphas_cumprod[cur_t], device=device, dtype=torch.float32)
-                sigma = torch.tensor(diffusion.sqrt_one_minus_alphas_cumprod[cur_t], device=device, dtype=torch.float32)
-                cosine_t = alpha_sigma_to_t(alpha, sigma)
-                out = secondary_model(x, cosine_t[None].repeat([n])).pred
-                fac = diffusion.sqrt_one_minus_alphas_cumprod[cur_t]
-                x_in = out * fac + x * (1 - fac)
-                x_in_grad = torch.zeros_like(x_in)
-              else:
-                my_t = torch.ones([n], device=device, dtype=torch.long) * cur_t
-                out = diffusion.p_mean_variance(model, x, my_t, clip_denoised=False, model_kwargs={'y': y})
-                fac = diffusion.sqrt_one_minus_alphas_cumprod[cur_t]
-                x_in = out['pred_xstart'] * fac + x * (1 - fac)
-                x_in_grad = torch.zeros_like(x_in)
-              for model_stat in model_stats:
-                for i in range(args.cutn_batches):
-                    t_int = int(t.item())+1 #errors on last step without +1, need to find source
-                    #when using SLIP Base model the dimensions need to be hard coded to avoid AttributeError: 'VisionTransformer' object has no attribute 'input_resolution'
-                    try:
-                        input_resolution=model_stat["clip_model"].visual.input_resolution
-                    except:
-                        input_resolution=224
+                    my_t = torch.ones([n], device=device, dtype=torch.long) * cur_t
+                    out = diffusion.p_mean_variance(model, x, my_t, clip_denoised=False, model_kwargs={'y': y})
+                    fac = diffusion.sqrt_one_minus_alphas_cumprod[cur_t]
+                    x_in = out['pred_xstart'] * fac + x * (1 - fac)
+                    x_in_grad = torch.zeros_like(x_in)
+                  for model_stat in model_stats:
+                    for i in range(args.cutn_batches):
+                        t_int = int(t.item())+1 #errors on last step without +1, need to find source
+                        #when using SLIP Base model the dimensions need to be hard coded to avoid AttributeError: 'VisionTransformer' object has no attribute 'input_resolution'
+                        try:
+                            input_resolution=model_stat["clip_model"].visual.input_resolution
+                        except:
+                            input_resolution=224
 
-                    cuts = MakeCutoutsDango(input_resolution,
-                            Overview= args.cut_overview[1000-t_int], 
-                            InnerCrop = args.cut_innercut[1000-t_int],
-                            IC_Size_Pow=args.cut_ic_pow[1000-t_int],
-                            IC_Grey_P = args.cut_icgray_p[1000-t_int]
-                            )
-                    clip_in = normalize(cuts(x_in.add(1).div(2)))
-                    image_embeds = model_stat["clip_model"].encode_image(clip_in).float()
-                    dists = spherical_dist_loss(image_embeds.unsqueeze(1), model_stat["target_embeds"].unsqueeze(0))
-                    dists = dists.view([args.cut_overview[1000-t_int]+args.cut_innercut[1000-t_int], n, -1])
-                    losses = dists.mul(model_stat["weights"]).sum(2).mean(0)
-                    loss_values.append(losses.sum().item()) # log loss, probably shouldn't do per cutn_batch
-                    x_in_grad += torch.autograd.grad(losses.sum() * clip_guidance_scale, x_in)[0] / cutn_batches
-              tv_losses = tv_loss(x_in)
-              if use_secondary_model is True:
-                range_losses = range_loss(out)
-              else:
-                range_losses = range_loss(out['pred_xstart'])
-              sat_losses = torch.abs(x_in - x_in.clamp(min=-1,max=1)).mean()
-              loss = tv_losses.sum() * tv_scale + range_losses.sum() * range_scale + sat_losses.sum() * sat_scale
-              if init is not None and init_scale:
-                  init_losses = lpips_model(x_in, init)
-                  loss = loss + init_losses.sum() * init_scale
-              x_in_grad += torch.autograd.grad(loss, x_in)[0]
-              if torch.isnan(x_in_grad).any()==False:
-                  grad = -torch.autograd.grad(x_in, x, x_in_grad)[0]
-              else:
-                # print("NaN'd")
-                x_is_NaN = True
-                grad = torch.zeros_like(x)
-          if args.clamp_grad and x_is_NaN == False:
-              magnitude = grad.square().mean().sqrt()
-              return grad * magnitude.clamp(max=args.clamp_max) / magnitude  #min=-0.02, min=-clamp_max, 
-          return grad
-  
-      if args.diffusion_sampling_mode == 'ddim':
-          sample_fn = diffusion.ddim_sample_loop_progressive
-      else:
-          sample_fn = diffusion.plms_sample_loop_progressive
-
-
-      image_display = Output()
-      for i in range(args.n_batches):
-          if args.animation_mode == 'None':
-            display.clear_output(wait=True)
-            batchBar = tqdm(range(args.n_batches), desc ="Batches")
-            batchBar.n = i
-            batchBar.refresh()
-          print('')
-          display.display(image_display)
-          gc.collect()
-          torch.cuda.empty_cache()
-          cur_t = diffusion.num_timesteps - skip_steps - 1
-          total_steps = cur_t
-
-          if perlin_init:
-              init = regen_perlin()
+                        cuts = MakeCutoutsDango(input_resolution,
+                                Overview= args.cut_overview[1000-t_int], 
+                                InnerCrop = args.cut_innercut[1000-t_int],
+                                IC_Size_Pow=args.cut_ic_pow[1000-t_int],
+                                IC_Grey_P = args.cut_icgray_p[1000-t_int]
+                                )
+                        clip_in = normalize(cuts(x_in.add(1).div(2)))
+                        image_embeds = model_stat["clip_model"].encode_image(clip_in).float()
+                        dists = spherical_dist_loss(image_embeds.unsqueeze(1), model_stat["target_embeds"].unsqueeze(0))
+                        dists = dists.view([args.cut_overview[1000-t_int]+args.cut_innercut[1000-t_int], n, -1])
+                        losses = dists.mul(model_stat["weights"]).sum(2).mean(0)
+                        loss_values.append(losses.sum().item()) # log loss, probably shouldn't do per cutn_batch
+                        x_in_grad += torch.autograd.grad(losses.sum() * clip_guidance_scale, x_in)[0] / cutn_batches
+                  tv_losses = tv_loss(x_in)
+                  if use_secondary_model is True:
+                    range_losses = range_loss(out)
+                  else:
+                    range_losses = range_loss(out['pred_xstart'])
+                  sat_losses = torch.abs(x_in - x_in.clamp(min=-1,max=1)).mean()
+                  loss = tv_losses.sum() * tv_scale + range_losses.sum() * range_scale + sat_losses.sum() * sat_scale
+                  if init is not None and init_scale:
+                      init_losses = lpips_model(x_in, init)
+                      loss = loss + init_losses.sum() * init_scale
+                  x_in_grad += torch.autograd.grad(loss, x_in)[0]
+                  if torch.isnan(x_in_grad).any()==False:
+                      grad = -torch.autograd.grad(x_in, x, x_in_grad)[0]
+                  else:
+                    # print("NaN'd")
+                    x_is_NaN = True
+                    grad = torch.zeros_like(x)
+              if args.clamp_grad and x_is_NaN == False:
+                  magnitude = grad.square().mean().sqrt()
+                  return grad * magnitude.clamp(max=args.clamp_max) / magnitude  #min=-0.02, min=-clamp_max, 
+              return grad
 
           if args.diffusion_sampling_mode == 'ddim':
-              samples = sample_fn(
-                  model,
-                  (batch_size, 3, args.side_y, args.side_x),
-                  clip_denoised=clip_denoised,
-                  model_kwargs={},
-                  cond_fn=cond_fn,
-                  progress=True,
-                  skip_timesteps=skip_steps,
-                  init_image=init,
-                  randomize_class=randomize_class,
-                  eta=eta,
-                  transformation_fn=symmetry_transformation_fn,
-                  transformation_percent=args.transformation_percent
-              )
+              sample_fn = diffusion.ddim_sample_loop_progressive
           else:
-              samples = sample_fn(
-                  model,
-                  (batch_size, 3, args.side_y, args.side_x),
-                  clip_denoised=clip_denoised,
-                  model_kwargs={},
-                  cond_fn=cond_fn,
-                  progress=True,
-                  skip_timesteps=skip_steps,
-                  init_image=init,
-                  randomize_class=randomize_class,
-                  order=2,
-              )
-          
-          
-          # with run_display:
-          # display.clear_output(wait=True)
-          for j, sample in enumerate(samples):    
-            cur_t -= 1
-            intermediateStep = False
-            if args.steps_per_checkpoint is not None:
-                if j % steps_per_checkpoint == 0 and j > 0:
+              sample_fn = diffusion.plms_sample_loop_progressive
+
+          image_display = Output()
+
+          for i in range(args.n_batches):
+              if args.animation_mode == 'None':
+                display.clear_output(wait=True)
+                print(f'Prompt: {prompt_variant}')
+                batchBar = tqdm(range(args.n_batches), desc ="Batches")
+                batchBar.n = i
+                batchBar.refresh()
+              print('')
+              display.display(image_display)
+              gc.collect()
+              torch.cuda.empty_cache()
+              cur_t = diffusion.num_timesteps - skip_steps - 1
+              total_steps = cur_t
+
+              if perlin_init:
+                  init = regen_perlin()
+
+              if args.diffusion_sampling_mode == 'ddim':
+                  samples = sample_fn(
+                      model,
+                      (batch_size, 3, args.side_y, args.side_x),
+                      clip_denoised=clip_denoised,
+                      model_kwargs={},
+                      cond_fn=cond_fn,
+                      progress=True,
+                      skip_timesteps=skip_steps,
+                      init_image=init,
+                      randomize_class=randomize_class,
+                      eta=eta,
+                      transformation_fn=symmetry_transformation_fn,
+                      transformation_percent=args.transformation_percent
+                  )
+              else:
+                  samples = sample_fn(
+                      model,
+                      (batch_size, 3, args.side_y, args.side_x),
+                      clip_denoised=clip_denoised,
+                      model_kwargs={},
+                      cond_fn=cond_fn,
+                      progress=True,
+                      skip_timesteps=skip_steps,
+                      init_image=init,
+                      randomize_class=randomize_class,
+                      order=2,
+                  )
+
+              # with run_display:
+              # display.clear_output(wait=True)
+              for j, sample in enumerate(samples):
+                cur_t -= 1
+                intermediateStep = False
+                if args.steps_per_checkpoint is not None:
+                    if j % steps_per_checkpoint == 0 and j > 0:
+                      intermediateStep = True
+                elif j in args.intermediate_saves:
                   intermediateStep = True
-            elif j in args.intermediate_saves:
-              intermediateStep = True
-            with image_display:
-              if j % args.display_rate == 0 or cur_t == -1 or intermediateStep == True:
-                  for k, image in enumerate(sample['pred_xstart']):
-                      # tqdm.write(f'Batch {i}, step {j}, output {k}:')
-                      current_time = datetime.now().strftime('%y%m%d-%H%M%S_%f')
-                      percent = math.ceil(j/total_steps*100)
-                      if args.n_batches > 0:
-                        #if intermediates are saved to the subfolder, don't append a step or percentage to the name
-                        if cur_t == -1 and args.intermediates_in_subfolder is True:
-                          save_num = f'{frame_num:04}' if animation_mode != "None" else i
-                          filename = f'{args.batch_name}({args.batchNum})_{save_num}.png'
-                        else:
-                          #If we're working with percentages, append it
+                with image_display:
+                  if j % args.display_rate == 0 or cur_t == -1 or intermediateStep == True:
+                      for k, image in enumerate(sample['pred_xstart']):
+                          # tqdm.write(f'Batch {i}, step {j}, output {k}:')
+                          current_time = datetime.now().strftime('%y%m%d-%H%M%S_%f')
+                          percent = math.ceil(j/total_steps*100)
+                          if args.n_batches > 0:
+                            #if intermediates are saved to the subfolder, don't append a step or percentage to the name
+                            if cur_t == -1 and args.intermediates_in_subfolder is True:
+                              save_num = f'{frame_num:04}' if animation_mode != "None" else i
+                              filename = f'{args.batch_name}({args.batchNum})[{marange_i}]_{save_num}.png'
+                            else:
+                              #If we're working with percentages, append it
+                              if args.steps_per_checkpoint is not None:
+                                filename = f'{args.batch_name}({args.batchNum})[{marange_i}]_{i:04}-{percent:02}%.png'
+                              # Or else, iIf we're working with specific steps, append those
+                              else:
+                                filename = f'{args.batch_name}({args.batchNum})[{marange_i}]_{i:04}-{j:03}.png'
+                          image = TF.to_pil_image(image.add(1).div(2).clamp(0, 1))
+                          if j % args.display_rate == 0 or cur_t == -1:
+                            image.save('progress.png')
+                            display.clear_output(wait=True)
+                            display.display(display.Image('progress.png'))
                           if args.steps_per_checkpoint is not None:
-                            filename = f'{args.batch_name}({args.batchNum})_{i:04}-{percent:02}%.png'
-                          # Or else, iIf we're working with specific steps, append those
+                            if j % args.steps_per_checkpoint == 0 and j > 0:
+                              if args.intermediates_in_subfolder is True:
+                                image.save(f'{partialFolder}/{filename}')
+                              else:
+                                image.save(f'{batchFolder}/{filename}')
                           else:
-                            filename = f'{args.batch_name}({args.batchNum})_{i:04}-{j:03}.png'
-                      image = TF.to_pil_image(image.add(1).div(2).clamp(0, 1))
-                      if j % args.display_rate == 0 or cur_t == -1:
-                        image.save('progress.png')
-                        display.clear_output(wait=True)
-                        display.display(display.Image('progress.png'))
-                      if args.steps_per_checkpoint is not None:
-                        if j % args.steps_per_checkpoint == 0 and j > 0:
-                          if args.intermediates_in_subfolder is True:
-                            image.save(f'{partialFolder}/{filename}')
-                          else:
+                            if j in args.intermediate_saves:
+                              if args.intermediates_in_subfolder is True:
+                                image.save(f'{partialFolder}/{filename}')
+                              else:
+                                image.save(f'{batchFolder}/{filename}')
+                          if cur_t == -1:
+                            if frame_num == 0:
+                              save_settings()
+                            if args.animation_mode != "None":
+                              image.save('prevFrame.png')
                             image.save(f'{batchFolder}/{filename}')
-                      else:
-                        if j in args.intermediate_saves:
-                          if args.intermediates_in_subfolder is True:
-                            image.save(f'{partialFolder}/{filename}')
-                          else:
-                            image.save(f'{batchFolder}/{filename}')
-                      if cur_t == -1:
-                        if frame_num == 0:
-                          save_settings()
-                        if args.animation_mode != "None":
-                          image.save('prevFrame.png')
-                        image.save(f'{batchFolder}/{filename}')
-                        if args.animation_mode == "3D":
-                          # If turbo, save a blended image
-                          if turbo_mode and frame_num > 0:
-                            # Mix new image with prevFrameScaled
-                            blend_factor = (1)/int(turbo_steps)
-                            newFrame = cv2.imread('prevFrame.png') # This is already updated..
-                            prev_frame_warped = cv2.imread('prevFrameScaled.png')
-                            blendedImage = cv2.addWeighted(newFrame, blend_factor, prev_frame_warped, (1-blend_factor), 0.0)
-                            cv2.imwrite(f'{batchFolder}/{filename}',blendedImage)
-                          else:
-                            image.save(f'{batchFolder}/{filename}')
+                            if args.animation_mode == "3D":
+                              # If turbo, save a blended image
+                              if turbo_mode and frame_num > 0:
+                                # Mix new image with prevFrameScaled
+                                blend_factor = (1)/int(turbo_steps)
+                                newFrame = cv2.imread('prevFrame.png') # This is already updated..
+                                prev_frame_warped = cv2.imread('prevFrameScaled.png')
+                                blendedImage = cv2.addWeighted(newFrame, blend_factor, prev_frame_warped, (1-blend_factor), 0.0)
+                                cv2.imwrite(f'{batchFolder}/{filename}',blendedImage)
+                              else:
+                                image.save(f'{batchFolder}/{filename}')
 
-                          if vr_mode:
-                            generate_eye_views(TRANSLATION_SCALE, batchFolder, filename, frame_num, midas_model, midas_transform)
+                              if vr_mode:
+                                generate_eye_views(TRANSLATION_SCALE, batchFolder, filename, frame_num, midas_model, midas_transform)
 
-                        # if frame_num != args.max_frames-1:
-                        #   display.clear_output()
-          
-          plt.plot(np.array(loss_values), 'r')
+                            # if frame_num != args.max_frames-1:
+                            #   display.clear_output()
+
+              plt.plot(np.array(loss_values), 'r')
 
 def generate_eye_views(trans_scale,batchFolder,filename,frame_num,midas_model, midas_transform):
    for i in range(2):
@@ -1535,113 +1546,115 @@ def generate_eye_views(trans_scale,batchFolder,filename,frame_num,midas_model, m
       transformed_image.save(eye_file_path)
 
 def save_settings():
-    setting_list = {
-      'text_prompts': text_prompts,
-      'image_prompts': image_prompts,
-      'clip_guidance_scale': clip_guidance_scale,
-      'tv_scale': tv_scale,
-      'range_scale': range_scale,
-      'sat_scale': sat_scale,
-      # 'cutn': cutn,
-      'cutn_batches': cutn_batches,
-      'max_frames': max_frames,
-      'interp_spline': interp_spline,
-      # 'rotation_per_frame': rotation_per_frame,
-      'init_image': init_image,
-      'init_scale': init_scale,
-      'skip_steps': skip_steps,
-      # 'zoom_per_frame': zoom_per_frame,
-      'frames_scale': frames_scale,
-      'frames_skip_steps': frames_skip_steps,
-      'perlin_init': perlin_init,
-      'perlin_mode': perlin_mode,
-      'skip_augs': skip_augs,
-      'randomize_class': randomize_class,
-      'clip_denoised': clip_denoised,
-      'clamp_grad': clamp_grad,
-      'clamp_max': clamp_max,
-      'seed': seed,
-      'fuzzy_prompt': fuzzy_prompt,
-      'rand_mag': rand_mag,
-      'eta': eta,
-      'width': width_height[0],
-      'height': width_height[1],
-      'diffusion_model': diffusion_model,
-      'use_secondary_model': use_secondary_model,
-      'steps': steps,
-      'diffusion_steps': diffusion_steps,
-      'diffusion_sampling_mode': diffusion_sampling_mode,
-      'ViTB32': ViTB32,
-      'ViTB16': ViTB16,
-      'ViTL14': ViTL14,
-      'ViTL14_336px': ViTL14_336px,
-      'RN101': RN101,
-      'RN50': RN50,
-      'RN50x4': RN50x4,
-      'RN50x16': RN50x16,
-      'RN50x64': RN50x64,
-      'ViTB32_laion2b_e16': ViTB32_laion2b_e16,
-      'ViTB32_laion400m_e31': ViTB32_laion400m_e31,
-      'ViTB32_laion400m_32': ViTB32_laion400m_32,
-      'ViTB32quickgelu_laion400m_e31': ViTB32quickgelu_laion400m_e31,
-      'ViTB32quickgelu_laion400m_e32': ViTB32quickgelu_laion400m_e32,
-      'ViTB16_laion400m_e31': ViTB16_laion400m_e31,
-      'ViTB16_laion400m_e32': ViTB16_laion400m_e32,
-      'RN50_yffcc15m': RN50_yffcc15m,
-      'RN50_cc12m': RN50_cc12m,
-      'RN50_quickgelu_yfcc15m': RN50_quickgelu_yfcc15m,
-      'RN50_quickgelu_cc12m': RN50_quickgelu_cc12m,
-      'RN101_yfcc15m': RN101_yfcc15m,
-      'RN101_quickgelu_yfcc15m': RN101_quickgelu_yfcc15m,
-      'cut_overview': str(cut_overview),
-      'cut_innercut': str(cut_innercut),
-      'cut_ic_pow': str(cut_ic_pow),
-      'cut_icgray_p': str(cut_icgray_p),
-      'key_frames': key_frames,
-      'max_frames': max_frames,
-      'angle': angle,
-      'zoom': zoom,
-      'translation_x': translation_x,
-      'translation_y': translation_y,
-      'translation_z': translation_z,
-      'rotation_3d_x': rotation_3d_x,
-      'rotation_3d_y': rotation_3d_y,
-      'rotation_3d_z': rotation_3d_z,
-      'midas_depth_model': midas_depth_model,
-      'midas_weight': midas_weight,
-      'near_plane': near_plane,
-      'far_plane': far_plane,
-      'fov': fov,
-      'padding_mode': padding_mode,
-      'sampling_mode': sampling_mode,
-      'video_init_path':video_init_path,
-      'extract_nth_frame':extract_nth_frame,
-      'video_init_seed_continuity': video_init_seed_continuity,
-      'turbo_mode':turbo_mode,
-      'turbo_steps':turbo_steps,
-      'turbo_preroll':turbo_preroll,
-      'use_horizontal_symmetry':use_horizontal_symmetry,
-      'use_vertical_symmetry':use_vertical_symmetry,
-      'transformation_percent':transformation_percent,
-      #video init settings
-      'video_init_steps': video_init_steps,
-      'video_init_clip_guidance_scale': video_init_clip_guidance_scale,
-      'video_init_tv_scale': video_init_tv_scale,
-      'video_init_range_scale': video_init_range_scale,
-      'video_init_sat_scale': video_init_sat_scale,
-      'video_init_cutn_batches': video_init_cutn_batches,
-      'video_init_skip_steps': video_init_skip_steps,
-      'video_init_frames_scale': video_init_frames_scale,
-      'video_init_frames_skip_steps': video_init_frames_skip_steps,
-      #warp settings
-      'video_init_flow_warp':video_init_flow_warp,
-      'video_init_flow_blend':video_init_flow_blend,
-      'video_init_check_consistency':video_init_check_consistency,
-      'video_init_blend_mode':video_init_blend_mode
-    }
-    # print('Settings:', setting_list)
-    with open(f"{batchFolder}/{batch_name}({batchNum})_settings.txt", "w+", encoding="utf-8") as f:   #save settings
-        json.dump(setting_list, f, ensure_ascii=False, indent=4)
+    if not os.path.isfile(f"{batchFolder}/{batch_name}({batchNum})_settings.txt"):
+        setting_list = {
+          'text_prompts': text_prompts,
+          'image_prompts': image_prompts,
+          'clip_guidance_scale': clip_guidance_scale,
+          'tv_scale': tv_scale,
+          'range_scale': range_scale,
+          'sat_scale': sat_scale,
+          # 'cutn': cutn,
+          'cutn_batches': cutn_batches,
+          'max_frames': max_frames,
+          'interp_spline': interp_spline,
+          # 'rotation_per_frame': rotation_per_frame,
+          'init_image': init_image,
+          'init_scale': init_scale,
+          'init_scale': init_scale,
+          'skip_steps': skip_steps,
+          # 'zoom_per_frame': zoom_per_frame,
+          'frames_scale': frames_scale,
+          'frames_skip_steps': frames_skip_steps,
+          'perlin_init': perlin_init,
+          'perlin_mode': perlin_mode,
+          'skip_augs': skip_augs,
+          'randomize_class': randomize_class,
+          'clip_denoised': clip_denoised,
+          'clamp_grad': clamp_grad,
+          'clamp_max': clamp_max,
+          'seed': seed,
+          'fuzzy_prompt': fuzzy_prompt,
+          'rand_mag': rand_mag,
+          'eta': eta,
+          'width': width_height[0],
+          'height': width_height[1],
+          'diffusion_model': diffusion_model,
+          'use_secondary_model': use_secondary_model,
+          'steps': steps,
+          'diffusion_steps': diffusion_steps,
+          'diffusion_sampling_mode': diffusion_sampling_mode,
+          'ViTB32': ViTB32,
+          'ViTB16': ViTB16,
+          'ViTL14': ViTL14,
+          'ViTL14_336px': ViTL14_336px,
+          'RN101': RN101,
+          'RN50': RN50,
+          'RN50x4': RN50x4,
+          'RN50x16': RN50x16,
+          'RN50x64': RN50x64,
+          'ViTB32_laion2b_e16': ViTB32_laion2b_e16,
+          'ViTB32_laion400m_e31': ViTB32_laion400m_e31,
+          'ViTB32_laion400m_32': ViTB32_laion400m_32,
+          'ViTB32quickgelu_laion400m_e31': ViTB32quickgelu_laion400m_e31,
+          'ViTB32quickgelu_laion400m_e32': ViTB32quickgelu_laion400m_e32,
+          'ViTB16_laion400m_e31': ViTB16_laion400m_e31,
+          'ViTB16_laion400m_e32': ViTB16_laion400m_e32,
+          'RN50_yffcc15m': RN50_yffcc15m,
+          'RN50_cc12m': RN50_cc12m,
+          'RN50_quickgelu_yfcc15m': RN50_quickgelu_yfcc15m,
+          'RN50_quickgelu_cc12m': RN50_quickgelu_cc12m,
+          'RN101_yfcc15m': RN101_yfcc15m,
+          'RN101_quickgelu_yfcc15m': RN101_quickgelu_yfcc15m,
+          'cut_overview': str(cut_overview),
+          'cut_innercut': str(cut_innercut),
+          'cut_ic_pow': str(cut_ic_pow),
+          'cut_icgray_p': str(cut_icgray_p),
+          'key_frames': key_frames,
+          'max_frames': max_frames,
+          'angle': angle,
+          'zoom': zoom,
+          'translation_x': translation_x,
+          'translation_y': translation_y,
+          'translation_z': translation_z,
+          'rotation_3d_x': rotation_3d_x,
+          'rotation_3d_y': rotation_3d_y,
+          'rotation_3d_z': rotation_3d_z,
+          'midas_depth_model': midas_depth_model,
+          'midas_weight': midas_weight,
+          'near_plane': near_plane,
+          'far_plane': far_plane,
+          'fov': fov,
+          'padding_mode': padding_mode,
+          'sampling_mode': sampling_mode,
+          'video_init_path':video_init_path,
+          'extract_nth_frame':extract_nth_frame,
+          'video_init_seed_continuity': video_init_seed_continuity,
+          'turbo_mode':turbo_mode,
+          'turbo_steps':turbo_steps,
+          'turbo_preroll':turbo_preroll,
+          'use_horizontal_symmetry':use_horizontal_symmetry,
+          'use_vertical_symmetry':use_vertical_symmetry,
+          'transformation_percent':transformation_percent,
+          #video init settings
+          'video_init_steps': video_init_steps,
+          'video_init_clip_guidance_scale': video_init_clip_guidance_scale,
+          'video_init_tv_scale': video_init_tv_scale,
+          'video_init_range_scale': video_init_range_scale,
+          'video_init_sat_scale': video_init_sat_scale,
+          'video_init_cutn_batches': video_init_cutn_batches,
+          'video_init_skip_steps': video_init_skip_steps,
+          'video_init_frames_scale': video_init_frames_scale,
+          'video_init_frames_skip_steps': video_init_frames_skip_steps,
+          #warp settings
+          'video_init_flow_warp':video_init_flow_warp,
+          'video_init_flow_blend':video_init_flow_blend,
+          'video_init_check_consistency':video_init_check_consistency,
+          'video_init_blend_mode':video_init_blend_mode
+        }
+        # print('Settings:', setting_list)
+        with open(f"{batchFolder}/{batch_name}({batchNum})_settings.txt", "w+", encoding="utf-8") as f:   #save settings
+            json.dump(setting_list, f, ensure_ascii=False, indent=4)
 
 # %%
 # !! {"metadata":{
@@ -2825,6 +2838,72 @@ use_vertical_symmetry = False #@param {type:"boolean"}
 use_horizontal_symmetry = False #@param {type:"boolean"}
 transformation_percent = [0.09] #@param
 
+# %%
+# !! {"metadata":{
+# !!   "id": "VariationsTop"
+# !! }}
+"""
+### Variations
+"""
+
+# %%
+# !! {"metadata":{
+# !!   "id": "Variations"
+# !! }}
+import re, random
+
+def randomizer(category):
+    randomizers = []
+    with open(f'{root_path}/settings/{category}.txt', encoding="utf-8") as f:
+        for line in f:
+            randomizers.append(line.strip())
+    return(randomizers)
+
+def pick_variant(str):
+  if str is None:
+    return None
+
+  out = str
+  variants = re.findall(r'\{[^{}]*?}', out)
+
+  for v in variants:
+    opts = v.strip("{}").split('|')
+    out = out.replace(v, random.choice(opts))
+  
+  combinations = re.findall(r'\[[^\[\]]*?]', out)
+  for c in combinations:
+    sc = c.strip("[]")
+    parts = sc.split('$$')
+    n_pick = None
+
+    if len(parts) > 2:
+      raise Excpetion(" we do not support more than 1 $$ in a combination")
+    if len(parts) == 2:
+      sc = parts[1]
+      n_pick = int(parts[0])
+    # check if there is a @<filename>
+    if sc.startswith('@'):
+        opts = randomizer(sc[1:])
+    else:
+        opts = sc.split('|')
+    if not n_pick:
+      n_pick = random.randint(1,len(opts))
+
+    # print('opts', opts)
+    # print('n_pick', n_pick)
+    sample = random.sample(opts, n_pick)
+    out = out.replace(c, ', '.join(sample))
+
+  if len(variants+combinations) > 0:
+    return pick_variant(out)
+  return out
+
+def pick_prompt_variant(prompts):
+  output = prompts[:]
+  
+  for i, p in enumerate(prompts):
+    output[i] = pick_variant(output[i])
+  return output
 
 # %%
 # !! {"metadata":{
@@ -2841,13 +2920,29 @@ transformation_percent = [0.09] #@param
 # !! }}
 # Note: If using a pixelart diffusion model, try adding "#pixelart" to the end of the prompt for a stronger effect. It'll tend to work a lot better!
 text_prompts = {
-    0: ["A beautiful painting of a singular lighthouse, shining its light across a tumultuous sea of blood by greg rutkowski and thomas kinkade, Trending on artstation.", "yellow color scheme"],
+    0: ["Ancient hiking trail in an enchanted forest a rich-colored ominous misty fantasy By [1$$@artist] as featured on artstation 3D"],
     100: ["This set of prompts start at frame 100","This prompt has weight five:5"],
 }
 
 image_prompts = {
     # 0:['ImagePromptsWorkButArentVeryGood.png:2',],
 }
+
+# %%
+# !! {"metadata":{
+# !!   "id": "PromptsTestTop"
+# !! }}
+"""
+### Prompt tester
+"""
+
+# %%
+# !! {"metadata":{
+# !!   "id": "PromptsTest"
+# !! }}
+# Prompt tester
+#@markdown Here you can test your prompt variations. Run this cell as many times as you want.
+print('prompt test', pick_prompt_variant(text_prompts[0]))
 
 # %%
 # !! {"metadata":{
@@ -2864,6 +2959,7 @@ image_prompts = {
 #@title Do the Run!
 #@markdown `n_batches` ignored with animation modes.
 display_rate = 20 #@param{type: 'number'}
+n_randomprompts = 1 #@param{type: 'number'}
 n_batches = 50 #@param{type: 'number'}
 
 if animation_mode == 'Video Input':
@@ -2934,7 +3030,7 @@ if resume_run:
             move_files(start_frame, existing_frames, batchFolder, retainFolder)
 else:
     start_frame = 0
-    batchNum = len(glob(batchFolder+"/*.txt"))
+    batchNum = len(glob(batchFolder+"/*_settings.txt"))
     while os.path.isfile(f"{batchFolder}/{batch_name}({batchNum})_settings.txt") or os.path.isfile(f"{batchFolder}/{batch_name}-{batchNum}_settings.txt"):
         batchNum += 1
 
@@ -2953,6 +3049,7 @@ args = {
     'image_prompts_series':split_prompts(image_prompts) if image_prompts else None,
     'seed': seed,
     'display_rate':display_rate,
+    'n_randomprompts':n_randomprompts if animation_mode == 'None' else 1,
     'n_batches':n_batches if animation_mode == 'None' else 1,
     'batch_size':batch_size,
     'batch_name': batch_name,
