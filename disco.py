@@ -2852,6 +2852,8 @@ transformation_percent = [0.09] #@param
 # !! }}
 import re, random
 
+artists = []  # used for [%artist] tag
+
 def randomizer(category):
     randomizers = []
     with open(f'{root_path}/settings/{category}.txt', encoding="utf-8") as f:
@@ -2860,6 +2862,7 @@ def randomizer(category):
     return(randomizers)
 
 def pick_variant(str):
+  global artists;
   if str is None:
     return None
 
@@ -2881,17 +2884,26 @@ def pick_variant(str):
     if len(parts) == 2:
       sc = parts[1]
       n_pick = int(parts[0])
-    # check if there is a @<filename>
-    if sc.startswith('@'):
-        opts = randomizer(sc[1:])
+    if sc == '%artist':
+        if not artists: #check if artists list is not empty
+            artists = randomizer('artist')
+        if not n_pick:
+            n_pick = random.randint(1, len(artists))
+        sample = artists[0:n_pick]
+        del artists[:n_pick] # remove the used artists
     else:
-        opts = sc.split('|')
-    if not n_pick:
-      n_pick = random.randint(1,len(opts))
+        # check if there is a @<filename>
+        if sc.startswith('@'):
+            opts = randomizer(sc[1:])
+        else:
+            opts = sc.split('|')
+        if not n_pick:
+            n_pick = random.randint(1,len(opts))
 
-    # print('opts', opts)
-    # print('n_pick', n_pick)
-    sample = random.sample(opts, n_pick)
+        # print('opts', opts)
+        # print('n_pick', n_pick)
+        sample = random.sample(opts, n_pick)
+
     out = out.replace(c, ', '.join(sample))
 
   if len(variants+combinations) > 0:
