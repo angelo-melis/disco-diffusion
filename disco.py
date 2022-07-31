@@ -1275,11 +1275,12 @@ def do_run():
 
           prompt_variant = pick_prompt_variant(frame_prompt)
           if prompt_variant !=  frame_prompt:
-                random_list = {
-                    'used_prompt': prompt_variant
-                }
-                with open(f"{batchFolder}/{args.batch_name}({args.batchNum})[{marange_i}] usedprompt.txt", "w+", encoding="utf-8") as f:
-                    json.dump(random_list, f, ensure_ascii=False, indent=4)
+                if write_used_prompt_file:
+                    random_list = {
+                        'used_prompt': prompt_variant
+                    }
+                    with open(f"{batchFolder}/{args.batch_name}({args.batchNum})[{marange_i}] usedprompt.txt", "w+", encoding="utf-8") as f:
+                        json.dump(random_list, f, ensure_ascii=False, indent=4)
 
           for clip_model in clip_models:
                 cutn = 16
@@ -1479,14 +1480,24 @@ def do_run():
                             #if intermediates are saved to the subfolder, don't append a step or percentage to the name
                             if cur_t == -1 and args.intermediates_in_subfolder is True:
                               save_num = f'{frame_num:04}' if animation_mode != "None" else i
-                              filename = f'{args.batch_name}({args.batchNum})[{marange_i}]_{save_num}.png'
+                              if write_prompt_in_filename and args.animation_mode == 'None':
+                                filename = f'{args.batch_name} - {args.batchNum:03}.{marange_i:03}.{save_num:03} {prompt_variant[0]}.png'
+                              else:
+                                filename = f'{args.batch_name}({args.batchNum})[{marange_i}]_{save_num}.png'
                             else:
                               #If we're working with percentages, append it
                               if args.steps_per_checkpoint is not None:
-                                filename = f'{args.batch_name}({args.batchNum})[{marange_i}]_{i:04}-{percent:02}%.png'
+                                if write_prompt_in_filename and args.animation_mode == 'None':
+                                    filename = f'{args.batch_name} - {args.batchNum:03}).{marange_i:03}.{i:04}-{percent:02}% {prompt_variant}.png'
+                                else:
+                                    filename = f'{args.batch_name}({args.batchNum})[{marange_i}]_{i:04}-{percent:02}%.png'
                               # Or else, iIf we're working with specific steps, append those
                               else:
-                                filename = f'{args.batch_name}({args.batchNum})[{marange_i}]_{i:04}-{j:03}.png'
+                                if write_prompt_in_filename and args.animation_mode == 'None':
+                                    filename = f'{args.batch_name} - {args.batchNum:03}).{marange_i:03}.{i:04}-{j:03} {prompt_variant}.png'
+                                else:
+                                    filename = f'{args.batch_name}({args.batchNum})[{marange_i}]_{i:04}-{j:03}.png'
+
                           image = TF.to_pil_image(image.add(1).div(2).clamp(0, 1))
                           if j % args.display_rate == 0 or cur_t == -1:
                             image.save('progress.png')
@@ -1546,7 +1557,12 @@ def generate_eye_views(trans_scale,batchFolder,filename,frame_num,midas_model, m
       transformed_image.save(eye_file_path)
 
 def save_settings():
-    if not os.path.isfile(f"{batchFolder}/{batch_name}({batchNum})_settings.txt"):
+    if write_prompt_in_filename:
+        filename = f"{batchFolder}/{batch_name} - {batchNum:03} settings.txt"
+    else:
+        filename = f"{batchFolder}/{batch_name}({batchNum})_settings.txt"
+
+    if not os.path.isfile(filename):
         setting_list = {
           'text_prompts': text_prompts,
           'image_prompts': image_prompts,
@@ -1653,7 +1669,7 @@ def save_settings():
           'video_init_blend_mode':video_init_blend_mode
         }
         # print('Settings:', setting_list)
-        with open(f"{batchFolder}/{batch_name}({batchNum})_settings.txt", "w+", encoding="utf-8") as f:   #save settings
+        with open(filename, "w+", encoding="utf-8") as f:   #save settings
             json.dump(setting_list, f, ensure_ascii=False, indent=4)
 
 # %%
@@ -2863,6 +2879,7 @@ def randomizer(category):
 
 def pick_variant(str):
   global artists;
+
   if str is None:
     return None
 
@@ -2880,13 +2897,15 @@ def pick_variant(str):
     n_pick = None
 
     if len(parts) > 2:
-      raise Excpetion(" we do not support more than 1 $$ in a combination")
+      raise Exception(" we do not support more than 1 $$ in a combination")
     if len(parts) == 2:
       sc = parts[1]
       n_pick = int(parts[0])
     if sc == '%artist':
         if not artists: #check if artists list is not empty
             artists = randomizer('artist')
+            del artists[:args.n_skipartists] # remove n_skipartists from the top of the artists list
+            args.n_skipartists = 0 # reset the number so that after another start of the cell no artists are removed
         if not n_pick:
             n_pick = random.randint(1, len(artists))
         sample = artists[0:n_pick]
@@ -2954,7 +2973,29 @@ image_prompts = {
 # !! }}
 # Prompt tester
 #@markdown Here you can test your prompt variations. Run this cell as many times as you want.
-print('prompt test', pick_prompt_variant(text_prompts[0]))
+skip_prompt_tester = True #@param {type: 'boolean'}
+if skip_prompt_tester:
+    print('Skipping Prompt Tester, uncheck skip_prompt_tester if you want to run this cell')
+else:
+    print('prompt test', pick_prompt_variant(text_prompts[0]))
+
+# %%
+# !! {"metadata":{
+# !!   "id": "ResetArtistTableTop"
+# !! }}
+"""
+### Reset Artistlist (artistlist is used when having %artist in the prompt)
+"""
+
+# %%
+# !! {"metadata":{
+# !!   "id": "ResetArtistTable"
+# !! }}
+skip_artistlist_reset = True #@param {type: 'boolean'}
+if skip_artistlist_reset:
+    print('Skipping Artistlist reset, uncheck skip_artistlist_reset if you want to run this cell')
+else:
+    del artists[:]
 
 # %%
 # !! {"metadata":{
@@ -2971,8 +3012,15 @@ print('prompt test', pick_prompt_variant(text_prompts[0]))
 #@title Do the Run!
 #@markdown `n_batches` ignored with animation modes.
 display_rate = 20 #@param{type: 'number'}
+#@markdown `n_randomprompts` is used when random or artistlist prompts are used
 n_randomprompts = 1 #@param{type: 'number'}
-n_batches = 50 #@param{type: 'number'}
+#@markdown `n_skipartists` is used when artistlist prompts are used
+n_skipartists = 0 #@param{type: 'number'}
+#@markdown `write_used_prompt_file` is used when random or artistlist prompts are used
+write_used_prompt_file = False #@param {type: 'boolean'}
+#@markdown `write_prompt_in_filename` is used when random or artistlist prompts are used
+write_prompt_in_filename = True #@param {type: 'boolean'}
+n_batches = 1 #@param{type: 'number'}
 
 if animation_mode == 'Video Input':
     steps = video_init_steps
@@ -3024,11 +3072,11 @@ if resume_run:
         try:
             batchNum
         except:
-            batchNum = len(glob(f"{batchFolder}/{batch_name}(*)_settings.txt"))-1
+            batchNum = len(glob(f"{batchFolder}/{batch_name}(*)settings.txt"))-1
     else:
         batchNum = int(run_to_resume)
     if resume_from_frame == 'latest':
-        start_frame = len(glob(batchFolder+f"/{batch_name}({batchNum})_*.png"))
+        start_frame = len(glob(batchFolder+f"/{batch_name}({batchNum})*.png"))
         if animation_mode != '3D' and turbo_mode == True and start_frame > turbo_preroll and start_frame % int(turbo_steps) != 0:
             start_frame = start_frame - (start_frame % int(turbo_steps))
     else:
@@ -3036,14 +3084,14 @@ if resume_run:
         if animation_mode != '3D' and turbo_mode == True and start_frame > turbo_preroll and start_frame % int(turbo_steps) != 0:
             start_frame = start_frame - (start_frame % int(turbo_steps))
         if retain_overwritten_frames is True:
-            existing_frames = len(glob(batchFolder+f"/{batch_name}({batchNum})_*.png"))
+            existing_frames = len(glob(batchFolder+f"/{batch_name}({batchNum})*.png"))
             frames_to_save = existing_frames - start_frame
             print(f'Moving {frames_to_save} frames to the Retained folder')
             move_files(start_frame, existing_frames, batchFolder, retainFolder)
 else:
     start_frame = 0
-    batchNum = len(glob(batchFolder+"/*_settings.txt"))
-    while os.path.isfile(f"{batchFolder}/{batch_name}({batchNum})_settings.txt") or os.path.isfile(f"{batchFolder}/{batch_name}-{batchNum}_settings.txt"):
+    batchNum = len(glob(batchFolder+"/*settings.txt"))
+    while os.path.isfile(f"{batchFolder}/{batch_name}({batchNum})_settings.txt") or os.path.isfile(f"{batchFolder}/{batch_name}-{batchNum}_settings.txt")  or os.path.isfile(f"{batchFolder}/{batch_name} - {batchNum:03} settings.txt"):
         batchNum += 1
 
 print(f'Starting Run: {batch_name}({batchNum}) at frame {start_frame}')
@@ -3062,6 +3110,7 @@ args = {
     'seed': seed,
     'display_rate':display_rate,
     'n_randomprompts':n_randomprompts if animation_mode == 'None' else 1,
+    'n_skipartists':n_skipartists if animation_mode == 'None' else 0,
     'n_batches':n_batches if animation_mode == 'None' else 1,
     'batch_size':batch_size,
     'batch_name': batch_name,
@@ -3212,7 +3261,7 @@ import PIL
 # @title ### **Create video**
 #@markdown Video file will save in the same folder as your images.
 from tqdm.notebook import trange
-skip_video_for_run_all = False #@param {type: 'boolean'}
+skip_video_for_run_all = True #@param {type: 'boolean'}
 
 if animation_mode == 'Video Input':
     frames = sorted(glob(in_path+'/*.*'));
@@ -3226,7 +3275,6 @@ blend =  0.5#@param {type: 'number'}
 video_init_check_consistency = False #@param {type: 'boolean'}
 if skip_video_for_run_all == True:
     print('Skipping video creation, uncheck skip_video_for_run_all if you want to run it')
-
 else:
     # import subprocess in case this cell is run without the above cells
     import subprocess
